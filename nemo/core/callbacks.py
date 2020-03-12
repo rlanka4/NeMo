@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
 import glob
 import os
 import sys
@@ -22,6 +23,8 @@ import time
 import warnings
 from abc import ABC, abstractmethod
 from collections import namedtuple
+
+import attrdict
 
 import nemo
 from nemo.utils import get_checkpoint_from_dir
@@ -630,3 +633,27 @@ class WandbCallback(ActionCallback):
         import wandb
 
         wandb.log(tensors_logged, step=self.step)
+
+
+class TrainLogger(SimpleLossLoggerCallback):
+    def __init__(self, tensors, metrics, freq, tb_writer, mu=0.99):
+        self._cache = collections.defaultdict(float)
+
+        def print_func(pt_tensors):
+            kv_tensors = attrdict.AttrDict(dict(zip(tensors.keys(), pt_tensors)))
+
+            for metric in metrics:
+                for k, v in metric(kv_tensors).items():
+                    self._cache[k] = (1 - mu) * self._cache[k] + mu * v
+
+        # noinspection PyUnusedLocal
+        def get_tb_values(*args, **kwargs):
+            return list(self._cache.items())
+
+        super().__init__(
+            tensors=list(tensors.values()),
+            print_func=print_func,
+            get_tb_values=get_tb_values,
+            step_freq=freq,
+            tb_writer=tb_writer,
+        )
