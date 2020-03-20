@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import argparse
 import math
 import os
 
-import attrdict
 from ruamel import yaml
 
 import nemo
@@ -35,22 +35,25 @@ def parse_args():
     parser.set_defaults(
         amp_opt_level='O0',
         model_config='configs/fasterspeech_durations.yaml',
-        batch_size=32,
+        batch_size=64,
         optimizer='novograd',
         weight_decay=1e-6,
         num_epochs=150,  # Couple of epochs for testing.
-        lr=1e-2,  # Goes good with Adam.
+        lr=2 * 1e-2,  # Goes good with Adam.
         work_dir='work',
         checkpoint_save_freq=15000,
     )
 
     # Default training things.
-    parser.add_argument('--train_log_freq', type=int, default=50, help="Train metrics logging frequency.")
+    parser.add_argument('--train_log_freq', type=int, default=500, help="Train metrics logging frequency.")
     parser.add_argument('--min_lr', type=float, default=1e-5, help="Minimum learning rate to decay to.")
     parser.add_argument('--warmup', type=int, default=3000, help="Number of steps for warmup.")
 
     # Durations from ASR CTC model.
-    parser.add_argument('--durs_dir', type=str, required=True, help="Train dataset durations directory path.")
+    parser.add_argument('--durs_file', type=str, required=True, help="Train dataset durations directory path.")
+    parser.add_argument(
+        '--durs_type', type=str, choices=['pad', 'full-pad'], default='full-pad', help="Durations handling type.",
+    )
 
     # Model.
     parser.add_argument('--d_emb', type=int, default=128, help="Size of input char embedding.")
@@ -62,19 +65,27 @@ def parse_args():
 
 class FasterSpeechGraph:
     def __init__(self, args, engine, config):
+        # Labels
+        labels = config.labels
+        pad_id, labels = len(labels), labels + ['<PAD>']
+        blank_id, labels = len(labels), labels + ['<BLANK>']
+
         self.data_layer = nemo_tts.FasterSpeechDataLayer(
-            manifest_filepath=args.train_dataset,
-            durs_dir=args.durs_dir,
-            labels=config.labels,
-            sample_rate=config.sample_rate,
+            manifests=args.train_dataset,
+            durs_file=args.durs_file,
+            labels=labels,
+            durs_type=args.durs_type,
             batch_size=args.batch_size,
-            num_workers=max(int(os.cpu_count() / engine.world_size), 1),
+            sample_rate=config.sample_rate,
+            pad_id=pad_id,
+            blank_id=blank_id,
             shuffle=True,
+            num_workers=max(int(os.cpu_count() / engine.world_size), 1),
             **config.FasterSpeechDataLayer,
         )
 
         self.model = nemo_tts.FasterSpeech(
-            n_vocab=len(config.labels), d_emb=args.d_emb, pad_id=None, jasper_kwargs=config.JasperEncoder, d_out=1,
+            n_vocab=len(labels), d_emb=args.d_emb, pad_id=pad_id, jasper_kwargs=config.JasperEncoder, d_out=1,
         )
 
         self.loss = nemo_tts.FasterSpeechDurLoss()
@@ -145,6 +156,8 @@ def main():
         optimization_level=args.amp_opt_level,
         cudnn_benchmark=args.cudnn_benchmark,
         log_dir=args.work_dir,
+        tensorboard_dir=args.tensorboard_dir,
+        create_tb_writer=True,
         files_to_copy=[args.model_config, __file__],
     )
     # noinspection PyProtectedMember
@@ -152,7 +165,7 @@ def main():
 
     yaml_loader = yaml.YAML(typ="safe")
     with open(args.model_config) as f:
-        config = attrdict.AttrDict(yaml_loader.load(f))
+        config = argparse.Namespace(**yaml_loader.load(f))
     logging.info('Config: %s', config)
 
     graph = FasterSpeechGraph(args, engine, config)
